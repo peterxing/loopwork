@@ -84,6 +84,7 @@
       { done: sessions.some(function (s) { return s.mode === 'glasses'; }), text: 'Capture smart-glasses footage on the job', href: '#/glasses' },
       { done: !!(me.deployed && me.deployed.inModel > 0), text: 'Retrain so your data is in the live model (Robot lab)', href: '#/lab' },
       { done: me.balances.byKind.royalty > 0, text: 'Earn a data dividend from a fleet shift', href: '#/lab' },
+      { done: (me.thcPayouts || []).some(function (p) { return p.status === 'confirmed'; }), text: 'Get paid in Transhuman Coin (THC wallet)', href: '#/wallet' },
       { done: ov.cycleNo > 0, text: 'Run the whole loop (button above)', href: null },
     ];
     return '<div class="checklist">' + items.map(function (it) {
@@ -217,14 +218,18 @@
       '<li><b>Train, evaluate, attribute:</b> each model version is evaluated on a fixed suite, and every contributor\'s data is valued by leave-one-out impact blended with volume.</li>' +
       '<li><b>Safety-gated deploy:</b> a version that regresses any skill by more than 10 points (or overall by more than 2) is blocked.</li>' +
       '<li><b>Data dividends:</b> ' + Math.round(cfg.royaltyRate * 100) + '% of every shift\'s fleet revenue is shared with the contributors whose data the live model uses, in proportion to their attributed value.</li></ul>' +
+      '<h2>Pay and get paid in Transhuman Coin (THC)</h2><ul>' +
+      '<li><b>Get paid in THC.</b> Workers link a crypto wallet and choose THC payouts. Cashing out converts their balance at the live THC price, and the platform treasury sends the THC on BNB Smart Chain. The money stays reserved until the transfer\'s on-chain receipt proves it arrived.</li>' +
+      '<li><b>Pay in THC.</b> Anyone can pay THC into the treasury to fund training data for a skill. Once the payment is verified on-chain, it becomes a sponsored bounty that teleoperators earn from.</li>' +
+      '<li><b>Your keys stay yours.</b> Transfers are approved in your own wallet (MetaMask, Trust Wallet and others). LoopWork never sees a seed phrase or private key. A built-in demo wallet on a simulated chain lets you try it all without real funds.</li></ul>' +
       '<h2>Worker protections built in</h2><ul>' +
       '<li>Time-based base pay: failed attempts are still paid for the time spent.</li>' +
       '<li>Face and screen blurring always on; privacy zones auto-pause; audio off by default; workplace permission and bystander notice are required.</li>' +
       '<li>Contributors can opt out of future training at any time. Already-trained models keep paying them dividends.</li>' +
       '<li>Transparent ledger: every cent is itemised (time, bounty, quality, dividend, payout).</li></ul>' +
       '<h2>What is simulated in this prototype</h2>' +
-      '<p>The humanoid world is a deterministic 2D manipulation simulator (reach, grasp, carry, sort, with fragile items and actuation noise). The policy is a structured k-nearest-neighbour behaviour-cloning model. Retargeting glasses footage into robot actions is simulated from the contributor\'s skill profile. Payments are ledger entries only. Everything else (marketplace, pricing, QA, replay verification, training, evaluation, attribution, gating and dividends) runs for real.</p>' +
-      (LW.api.hosted ? '<p style="margin-top:8px">On this public demo site the whole platform, including the part that would normally run on a server, runs inside your browser. Your progress stays on this device and nothing you do is sent anywhere. <a href="https://github.com/peterxing/loopwork" target="_blank" rel="noopener">The source code is on GitHub</a>.</p>' : '') +
+      '<p>The humanoid world is a deterministic 2D manipulation simulator (reach, grasp, carry, sort, with fragile items and actuation noise). The policy is a structured k-nearest-neighbour behaviour-cloning model. Retargeting glasses footage into robot actions is simulated from the contributor\'s skill profile. Bank payouts are ledger entries only, while THC payments are real BNB Smart Chain transfers when you use a real wallet (or a simulated chain with the demo wallet). Everything else (marketplace, pricing, QA, replay verification, training, evaluation, attribution, gating and dividends) runs for real.</p>' +
+      (LW.api.hosted ? '<p style="margin-top:8px">On this public demo site the whole platform, including the part that would normally run on a server, runs inside your browser, and your progress stays on this device. Only the THC wallet talks to outside services: it reads THC prices (CoinGecko, DexScreener) and BNB Smart Chain data, and sends the transfers you approve in your wallet. <a href="https://github.com/peterxing/loopwork" target="_blank" rel="noopener">The source code is on GitHub</a>.</p>' : '') +
       '</section>';
     return null;
   };

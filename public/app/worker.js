@@ -12,7 +12,7 @@
     const progress = b.unit === 'hour' ? Math.round(b.filled) + ' / ' + b.target + ' min' : b.unit === 'takeover' ? 'one takeover' : b.filled + ' / ' + b.target + ' demos';
     const lvlNote = b.mode === 'teleop' && b.effectiveRateCents !== b.rateCents ? ' <span class="tiny soft">(' + LW.money(b.effectiveRateCents) + ' at your level)</span>' : '';
     return '<div class="bounty k-' + b.kind + '">' +
-      '<div class="row">' + LW.kindPill(b) + '<span class="pill">' + (LW.OBJ_ICON[Sim.SKILLS[b.skill].object] || '') + ' ' + esc(b.skillName) + '</span>' +
+      '<div class="row">' + LW.kindPill(b) + (b.sponsored ? '<span class="pill accent" title="Funded with ' + esc(b.sponsored.thc) + ' THC">💎 Sponsored</span>' : '') + '<span class="pill">' + (LW.OBJ_ICON[Sim.SKILLS[b.skill].object] || '') + ' ' + esc(b.skillName) + '</span>' +
       '<span class="rate">' + LW.money(b.rateCents) + '<small>' + LW.unitLabel(b.unit) + '</small></span></div>' +
       '<div class="title">' + esc(b.title) + lvlNote + '</div>' +
       '<div class="reason">' + esc(b.reason) + '</div>' +
@@ -60,10 +60,10 @@
             '<div style="margin-top:12px"><div class="row between small"><b>L' + lvl.level + ' · ' + esc(lvl.name) + '</b><span class="muted">×' + lvl.mult + ' bounty rate</span></div>' + LW.bar(nextPct) +
             '<div class="tiny soft" style="margin-top:4px">' + (lvl.next ? lvl.approved + ' / ' + lvl.next.at + ' accepted teleop demos to L' + lvl.next.level + ' (' + esc(lvl.next.name) + ')' : 'Top level reached') + '</div></div>' : '') +
         '</div>' +
-        '<div class="card"><div class="card-head"><h2>Wallet</h2><span class="small muted">paid to ' + esc(w.payout) + '</span></div>' +
-          '<div class="row between"><div><div class="small muted">Available now</div><div style="font-size:30px;font-weight:750">' + LW.money(bal.available) + '</div></div>' +
+        '<div class="card"><div class="card-head"><h2>Wallet</h2><span class="small muted">' + (w.payoutMethod === 'thc' && w.thcNetwork ? '💎 paid in THC to <span class="addr">' + esc(w.wallets[w.thcNetwork].slice(0, 6) + '…' + w.wallets[w.thcNetwork].slice(-4)) + '</span>' : 'paid to ' + esc(w.payout)) + ' · <a href="#/wallet">THC wallet</a></span></div>' +
+          '<div class="row between"><div><div class="small muted">Available now</div><div style="font-size:30px;font-weight:750">' + LW.money(bal.available) + '</div>' + (bal.available < 0 ? '<div class="tiny soft">A THC payout went through after it had failed; new earnings cover it first</div>' : '') + '</div>' +
           '<button class="btn primary" data-act="payout" ' + (bal.available > 0 ? '' : 'disabled') + '>Cash out</button></div>' +
-          '<div class="row small muted" style="margin:6px 0 12px;gap:14px"><span>Pending review ' + LW.money(bal.pending) + '</span><span>Lifetime ' + LW.money(bal.earned) + '</span><span>Paid out ' + LW.money(bal.paidOut) + '</span></div>' +
+          '<div class="row small muted" style="margin:6px 0 12px;gap:14px"><span>Pending review ' + LW.money(bal.pending) + '</span><span>Lifetime ' + LW.money(bal.earned) + '</span><span>Paid out ' + LW.money(bal.paidOut) + '</span>' + (bal.processing ? '<span>On its way in THC ' + LW.money(bal.processing) + '</span>' : '') + '</div>' +
           LW.hStacked([{ label: 'Earnings mix', values: bal.byKind }], ['base', 'bounty', 'quality', 'royalty']) +
           '<div class="small muted" style="margin-top:8px">Effective rate <b>' + (me.activeHours >= 0.05 ? LW.money(me.effectiveHourlyCents) + '/hr' : 'n/a yet') + '</b> over ' + me.activeHours + ' hours of sessions, plus dividends</div>' +
         '</div>' +
@@ -104,7 +104,9 @@
       if (b) {
         await LW.busy(b, async function () {
           const r = await LW.api.call('payout', { workerId: w.id });
-          LW.toast('💸 Paid ' + LW.money(r.receipt.amountCents) + ' to ' + esc(r.receipt.method) + ' · ref ' + esc(r.receipt.reference), 'ok', 6000);
+          LW.toast(r.thcPayout
+            ? '💎 Queued ' + esc(r.thcPayout.thc) + ' THC to your wallet. <a href="#/wallet">Track it in THC wallet →</a>'
+            : '💸 Paid ' + LW.money(r.receipt.amountCents) + ' to ' + esc(r.receipt.method) + ' · ref ' + esc(r.receipt.reference), 'ok', 6000);
           LW.refresh();
         });
       }

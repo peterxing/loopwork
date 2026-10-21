@@ -14,7 +14,7 @@
     "start": "node server.js",
     "reset": "node server.js --reset",
     "build:static": "node scripts/build-static.js",
-    "test": "node --test test/sim.test.js test/policy.test.js test/engine.test.js test/server.test.js test/static.test.js"
+    "test": "node --test test/sim.test.js test/policy.test.js test/engine.test.js test/server.test.js test/static.test.js test/thc.test.js"
   },
   "engines": {
     "node": ">=20"

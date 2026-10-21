@@ -4,9 +4,9 @@
  * server (authoritative, persisted) and the browser (offline demo mode).
  */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./sim.js'), require('./policy.js'));
-  else root.LoopEngine = factory(root.LoopSim, root.LoopPolicy);
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (Sim, Policy) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./sim.js'), require('./policy.js'), require('./thc.js'));
+  else root.LoopEngine = factory(root.LoopSim, root.LoopPolicy, root.LoopThc);
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (Sim, Policy, Thc) {
   'use strict';
 
   const SCHEMA = 1;
@@ -156,10 +156,15 @@
     return e;
   }
   function balances(state, workerId) {
-    const out = { available: 0, pending: 0, earned: 0, paidOut: 0, byKind: { base: 0, bounty: 0, quality: 0, royalty: 0 } };
+    const out = { available: 0, pending: 0, earned: 0, paidOut: 0, processing: 0, byKind: { base: 0, bounty: 0, quality: 0, royalty: 0 } };
     state.ledger.forEach(function (e) {
       if (e.worker !== workerId || e.status === 'void') return;
-      if (e.kind === 'payout') { out.paidOut -= e.cents; out.available += e.cents; return; }
+      if (e.kind === 'payout') {
+        // Payouts reserve funds immediately; THC payouts count as paid once confirmed on-chain.
+        out.available += e.cents;
+        if (e.status === 'paid') out.paidOut -= e.cents; else out.processing -= e.cents;
+        return;
+      }
       if (e.status === 'pending') { out.pending += e.cents; return; }
       out.available += e.cents;
       out.earned += e.cents;
@@ -177,7 +182,11 @@
 
   // ---------------------------------------------------------------- views (what the API returns)
   function workerView(w) {
-    return { id: w.id, name: w.name, initials: w.initials, persona: w.persona, city: w.city, country: w.country, modes: w.modes.slice(), simulated: !!w.simulated, device: w.device, payout: w.payout, joinedAt: w.joinedAt, consent: Object.assign({}, w.consent) };
+    return {
+      id: w.id, name: w.name, initials: w.initials, persona: w.persona, city: w.city, country: w.country, modes: w.modes.slice(), simulated: !!w.simulated,
+      device: w.device, payout: w.payout, joinedAt: w.joinedAt, consent: Object.assign({}, w.consent),
+      wallets: Object.assign({}, w.wallets || {}), payoutMethod: w.payoutMethod || 'bank', thcNetwork: thcNetworkFor(w),
+    };
   }
   function failureVerb(failure, type) {
     const obj = Sim.OBJECTS[type].label.toLowerCase();
@@ -204,6 +213,7 @@
       eventId: b.eventId || null, failure: b.failure || null, robot: b.robotName || null, site: b.siteName || null, history: b.history.slice(-12),
       eligible: w ? w.modes.indexOf(b.mode) >= 0 : true,
       effectiveRateCents: lvl ? Math.round(b.rateCents * lvl.mult) : b.rateCents,
+      sponsored: b.sponsored ? Object.assign({}, b.sponsored, { networkLabel: netLabel(b.sponsored.network), thc: Thc.formatUnits(b.sponsored.units) }) : null,
     };
   }
   function sessionView(state, s, withDetail) {
@@ -282,7 +292,7 @@
       const data = approvedCount(state, skillId);
       const modes = Object.keys(st.modes).sort(function (a, b) { return st.modes[b] - st.modes[a]; });
       const top = modes[0];
-      const open = state.bounties.filter(function (b) { return b.skill === skillId && b.status === 'open'; });
+      const open = state.bounties.filter(function (b) { return b.skill === skillId && b.status === 'open' && !b.sponsored; });
       if (f >= 0.12 && st.n - st.ok >= 2) {
         const reason = pct(f) + ' of "' + skill.name + '" tasks failed in shift ' + shift.no + (top ? ' (mostly: ' + Sim.FAILURES[top].short + ')' : '');
         const need = Math.ceil(6 + 24 * severity);
@@ -869,6 +879,7 @@
         consent: { faceBlur: true, privacyZones: true, audio: false, openResearch: i % 3 === 1, dataOptOut: false },
       }));
     });
+    ensureThc(state);
     SITES.forEach(function (s) { addSite(state, s, now - 30 * DAY); });
     seedHistory(state, now);
     return state;
@@ -988,6 +999,7 @@
       royalties: royalties,
       ledger: state.ledger.filter(function (e) { return e.worker === w.id; }).slice(-30).reverse(),
       bounties: opBounties(box, { workerId: w.id }).bounties,
+      thcPayouts: state.thc.payouts.filter(function (p) { return p.worker === w.id; }).slice(-10).reverse().map(function (p) { return thcPayoutView(state, p); }),
     };
   }
 
@@ -1200,10 +1212,10 @@
   function opOps(box) {
     const state = box.state;
     const byKind = { base: 0, bounty: 0, quality: 0, royalty: 0 };
-    let pending = 0, paidOut = 0;
+    let pending = 0, paidOut = 0, processing = 0;
     state.ledger.forEach(function (e) {
       if (e.status === 'void') return;
-      if (e.kind === 'payout') { paidOut -= e.cents; return; }
+      if (e.kind === 'payout') { if (e.status === 'paid') paidOut -= e.cents; else processing -= e.cents; return; }
       if (e.status === 'pending') { pending += e.cents; return; }
       byKind[e.kind] += e.cents;
     });
@@ -1215,7 +1227,7 @@
         const w = state.workers.find(function (x) { return x.id === e.worker; });
         return Object.assign({}, e, { workerName: w ? w.name : e.worker });
       }),
-      totals: { byKind: byKind, pending: pending, paidOut: paidOut },
+      totals: { byKind: byKind, pending: pending, paidOut: paidOut, processing: processing },
       integrity: {
         replayMismatch: flagCount('replay_mismatch'), fasterThanRealtime: flagCount('faster_than_realtime'),
         rejected: state.sessions.filter(function (s) { return s.status === 'rejected'; }).length,
@@ -1233,23 +1245,37 @@
     const bal = balances(state, w.id);
     const amount = args.amountCents != null ? Math.min(Math.round(Number(args.amountCents) || 0), bal.available) : bal.available;
     if (!(amount > 0)) fail('Nothing available to pay out yet', 409);
+    const method = args.method || w.payoutMethod || 'bank';
+    if (method !== 'bank' && method !== 'thc') fail('method must be "bank" or "thc"');
+    if (method === 'thc') {
+      const p = queueThcPayout(state, w, amount, args.network, now);
+      return {
+        receipt: { id: p.ledgerId, reference: 'THC-' + p.id.toUpperCase(), amountCents: amount, method: fmtThc(p.units) + ' to ' + Thc.shortAddress(p.to), at: now },
+        thcPayout: thcPayoutView(state, p), balances: balances(state, w.id),
+      };
+    }
     const e = addLedger(state, w.id, 'payout', -amount, null, 'Instant payout to ' + w.payout + ' (simulated)', 'paid', now);
     log(state, 'payout', w.name + ' cashed out ' + money(amount), now);
     return { receipt: { id: e.id, reference: 'PO-' + e.id.toUpperCase(), amountCents: amount, method: w.payout, at: now }, balances: balances(state, w.id) };
   }
   function opPayAll(box, args, now) {
     const state = box.state;
-    let count = 0, total = 0;
+    let count = 0, total = 0, thcQueued = 0;
+    const skipped = [];
     state.workers.forEach(function (w) {
       const bal = balances(state, w.id);
-      if (bal.available > 0) {
+      if (!(bal.available > 0)) return;
+      if (w.payoutMethod === 'thc' && thcNetworkFor(w)) {
+        try { queueThcPayout(state, w, bal.available, null, now); thcQueued++; }
+        catch (e) { if (!(e instanceof LoopError)) throw e; skipped.push(w.name + ': ' + e.message); return; }
+      } else {
         addLedger(state, w.id, 'payout', -bal.available, null, 'Weekly payout run to ' + w.payout + ' (simulated)', 'paid', now);
-        count++; total += bal.available;
       }
+      count++; total += bal.available;
     });
-    if (!count) fail('No balances to pay out', 409);
-    log(state, 'payout', 'Payout run: ' + money(total) + ' to ' + count + ' contributors', now);
-    return { count: count, totalCents: total };
+    if (!count) fail(skipped.length ? 'No payouts could be made: ' + skipped.join('; ') : 'No balances to pay out', 409);
+    log(state, 'payout', 'Payout run: ' + money(total) + ' to ' + count + ' contributors' + (thcQueued ? ' (' + thcQueued + ' in THC, waiting for the treasury)' : ''), now);
+    return { count: count, totalCents: total, thcQueued: thcQueued, skipped: skipped };
   }
 
   function opUpdateConsent(box, args, now) {
@@ -1296,6 +1322,584 @@
     return { ok: true };
   }
 
+  // ---------------------------------------------------------------- Transhuman Coin (THC) payments
+  // Workers can be paid in THC (the platform treasury sends it, signed in the treasury's wallet) and
+  // anyone can pay THC into the treasury to fund training data (a sponsored bounty). Every transfer is
+  // checked against its on-chain receipt before money moves in the ledger.
+  const THC_SEED_USD = 0.00004089; // CoinGecko, 21 Oct 2026; the THC wallet page refreshes it live
+  const THC_SEED_AT = Date.UTC(2026, 9, 20, 21, 50, 0); // when the bundled price was read (21 Oct, Sydney time)
+  const THC_PREFERS = { w_hana: true, w_aisha: true };
+  const MAX_THC_RECORDS = 300; // finished records kept; unfinished ones are never dropped
+  const MIN_THC_PAYOUT_CENTS = 100;
+  const MAX_ACTIVE_PAYOUTS = 5; // per worker: queued, sending or submitted
+  const MAX_OPEN_INVOICES = 100;
+  const INVOICE_TTL = DAY; // unpaid (never sent) payment requests expire after a day
+  const TIME_SLACK_S = 300; // tolerated clock difference between the platform and the chain
+  const FINISHED = { confirmed: true, paid: true, failed: true, cancelled: true, expired: true };
+  const THC_SUPPLY_UNITS = 7000000000n * Thc.UNIT;
+  const LOCK_TTL = 10 * MIN; // after this, a lock whose window vanished may be released or attached by anyone
+  const MAX_OPEN_INVOICES_PER_PAYER = 5;
+  const MAX_TX_PER_RECORD = 8; // unconfirmed transactions that can be recorded against one payout or payment
+
+  function newLockToken() {
+    const c = typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function' ? globalThis.crypto : null;
+    if (c) return Array.from(c.getRandomValues(new Uint32Array(4)), function (x) { return x.toString(16).padStart(8, '0'); }).join('');
+    return (Math.random().toString(16).slice(2) + Math.random().toString(16).slice(2)).padEnd(24, '0');
+  }
+  function lockStale(r, now) { return r.status === 'sending' && now - (r.sendingAt || 0) > LOCK_TTL; }
+  function holdsLock(r, args) { return typeof args.lock === 'string' && !!r.lock && args.lock === r.lock; }
+  function clearLock(r) { delete r.lock; delete r.resumeStatus; delete r.sendingAt; }
+
+  function netLabel(n) { return Thc.NETWORKS[n] ? Thc.NETWORKS[n].label : String(n); }
+  function fmtThc(units) { return Thc.formatUnits(units) + ' THC'; }
+  function checkNetwork(n) { if (!Object.prototype.hasOwnProperty.call(Thc.NETWORKS, n)) fail('network must be "sim" or "bsc"'); return n; }
+  function checkAddress(a) { try { return Thc.normAddress(a); } catch (e) { return fail(e.message); } }
+
+  /** Adds THC state to new and previously saved platforms (idempotent, so old saves keep working). */
+  function ensureThc(state) {
+    if (!state.thc) {
+      state.thc = {
+        rateE18: Thc.rateToE18(THC_SEED_USD).toString(), rateSource: 'CoinGecko (bundled)', rateAt: THC_SEED_AT,
+        feePct: 0, maxTxUnits: (80000000n * Thc.UNIT).toString(), chainInfoAt: null,
+        treasury: { sim: Thc.demoAddress('treasury'), bsc: null },
+        payouts: [], invoices: [], usedTx: {},
+      };
+    }
+    state.workers.forEach(function (w) {
+      if (!w.wallets) {
+        w.wallets = {};
+        if (w.simulated) w.wallets.sim = Thc.demoAddress('worker:' + w.id);
+      }
+      if (!w.payoutMethod) w.payoutMethod = THC_PREFERS[w.id] && w.wallets.sim ? 'thc' : 'bank';
+    });
+    return state.thc;
+  }
+  /** Which linked wallet THC payouts go to: the chosen one, else BNB Smart Chain, else the simulated chain. */
+  function thcNetworkFor(w) {
+    const ws = w.wallets || {};
+    if (w.thcNetwork && ws[w.thcNetwork]) return w.thcNetwork;
+    if (ws.bsc) return 'bsc';
+    if (ws.sim) return 'sim';
+    return null;
+  }
+  /** Keep the newest finished records; payouts and payments still in flight are never dropped. */
+  function trimRecords(list) {
+    let excess = list.length - MAX_THC_RECORDS;
+    for (let i = 0; i < list.length && excess > 0;) {
+      if (FINISHED[list[i].status]) { list.splice(i, 1); excess--; } else i++;
+    }
+  }
+  /**
+   * Payment requests that never completed expire after a day so they stop counting against the caps.
+   * One that was actually sent can still be settled later (see opSettleThc).
+   */
+  function expireInvoices(state, now) {
+    state.thc.invoices.forEach(function (inv) {
+      if (now - inv.createdAt <= INVOICE_TTL) return;
+      if (inv.status === 'open' || inv.status === 'submitted' || lockStale(inv, now)) {
+        inv.status = 'expired'; inv.settledAt = now; inv.note = 'Expired before it was confirmed';
+        clearLock(inv);
+      }
+    });
+  }
+  /** Who may send THC for a record: the treasury (at queue time or now) for payouts, the payer for payments. */
+  function sendersFor(state, refType, r) {
+    if (refType === 'invoice') return [r.payer];
+    return [r.treasury, state.thc.treasury[r.network]].filter(Boolean);
+  }
+  function rateView(t) {
+    return { usdPerThc: Thc.rateFromE18(t.rateE18), thcPerUsd: Thc.formatUnits(Thc.centsToUnits(100, t.rateE18), 0), rateE18: t.rateE18, source: t.rateSource, at: t.rateAt };
+  }
+  function thcPayoutView(state, p) {
+    const w = state.workers.find(function (x) { return x.id === p.worker; });
+    const v = Object.assign({}, p, {
+      type: 'payout', workerName: w ? w.name : p.worker, networkLabel: netLabel(p.network),
+      thc: Thc.formatUnits(p.units), thcGross: Thc.formatUnits(p.grossUnits), thcReceived: p.receivedUnits ? Thc.formatUnits(p.receivedUnits) : null,
+      explorer: Thc.explorerTx(p.network, p.txHash),
+    });
+    delete v.lock; // the lock token only goes to the window that took it
+    return v;
+  }
+  function thcInvoiceView(state, inv) {
+    const v = Object.assign({}, inv, {
+      type: 'invoice', networkLabel: netLabel(inv.network), skillName: Sim.SKILLS[inv.skill].name,
+      thc: Thc.formatUnits(inv.units), thcGross: Thc.formatUnits(inv.grossUnits), thcReceived: inv.receivedUnits ? Thc.formatUnits(inv.receivedUnits) : null,
+      explorer: Thc.explorerTx(inv.network, inv.txHash),
+    });
+    delete v.lock;
+    return v;
+  }
+  function sponsorRateCents(state, skillId) { return Math.max(25, priceTeleop(0.3, approvedCount(state, skillId))); }
+
+  function queueThcPayout(state, w, cents, network, now) {
+    const t = state.thc;
+    const net = network ? checkNetwork(network) : thcNetworkFor(w);
+    if (!net || !w.wallets[net]) fail(w.name + ' has no ' + (net ? netLabel(net) + ' ' : '') + 'wallet linked for THC payouts yet', 409);
+    if (cents < MIN_THC_PAYOUT_CENTS) fail('THC payouts start at ' + money(MIN_THC_PAYOUT_CENTS) + '; ' + w.name + ' has ' + money(cents) + ' available', 409);
+    const active = t.payouts.filter(function (p) { return p.worker === w.id && !FINISHED[p.status]; }).length;
+    if (active >= MAX_ACTIVE_PAYOUTS) fail(w.name + ' already has ' + active + ' THC payouts in progress. Wait for those to arrive.', 409);
+    const units = Thc.centsToUnits(cents, t.rateE18);
+    if (units <= 0n) fail('That amount is too small to pay in THC', 409);
+    const gross = Thc.grossUp(units, t.feePct);
+    if (gross > BigInt(t.maxTxUnits)) fail('That payout is more than THC allows in one transfer (' + Thc.formatUnits(t.maxTxUnits, 0) + ' THC). Cash out a smaller amount.', 409);
+    const p = {
+      id: nextId(state, 'tp'), worker: w.id, network: net, to: w.wallets[net], treasury: t.treasury[net] || null, cents: cents, units: units.toString(), grossUnits: gross.toString(),
+      rateE18: t.rateE18, feePct: t.feePct, status: 'queued', createdAt: now, txHash: null, receivedUnits: null, from: null, settledAt: null, note: null,
+    };
+    const e = addLedger(state, w.id, 'payout', -cents, p.id, 'THC payout · ' + fmtThc(units) + ' to ' + Thc.shortAddress(p.to) + ' (' + Thc.NETWORKS[net].short + ')', 'pending', now);
+    p.ledgerId = e.id;
+    t.payouts.push(p);
+    trimRecords(t.payouts);
+    log(state, 'payout', w.name + ' cashed out ' + money(cents) + ' as ' + fmtThc(units) + ', waiting for the treasury to send it', now);
+    return p;
+  }
+  function voidPayoutLedger(state, p) {
+    const e = state.ledger.find(function (x) { return x.id === p.ledgerId; });
+    if (e && e.status !== 'paid') e.status = 'void';
+  }
+  /**
+   * A failed payout gave its money back to the worker. A transaction attached to it afterwards has
+   * already left the treasury, so it takes that money back, even if the worker has cashed it out again
+   * meanwhile. Then their balance goes negative, and opStartThcTx holds their unsent THC payouts
+   * until it is covered.
+   */
+  function reservePayoutLedger(state, p) {
+    const e = state.ledger.find(function (x) { return x.id === p.ledgerId; });
+    if (!e || e.status !== 'void') return;
+    e.status = 'pending';
+    p.reattached = true;
+    const left = balances(state, p.worker).available;
+    p.note = left < 0 ? workerName(state, p.worker) + ' had already cashed this money out again, so they are at ' + money(left) + ' and their unsent THC payouts are on hold' : null;
+  }
+  function workerName(state, id) { const w = state.workers.find(function (x) { return x.id === id; }); return w ? w.name : id; }
+  function findThcRecord(state, refType, refId) {
+    ensureThc(state);
+    const list = refType === 'payout' ? state.thc.payouts : refType === 'invoice' ? state.thc.invoices : null;
+    if (!list) fail('refType must be "payout" or "invoice"');
+    const r = list.find(function (x) { return x.id === refId; });
+    if (!r) fail('THC ' + refType + ' not found: ' + String(refId).slice(0, 40), 404);
+    return r;
+  }
+  /**
+   * A transaction hash can belong to exactly one payout or payment. mode 'replace' lets a record point at
+   * a replacement transaction (sped up, or re-sent after the first was dropped); every hash a record has
+   * used stays reserved for it.
+   */
+  function claimTx(state, r, hash, mode, arrived) {
+    if (!Thc.isTxHash(hash)) fail('txHash must be a 0x-prefixed 32-byte transaction hash');
+    const h = hash.toLowerCase();
+    const owner = state.thc.usedTx[h];
+    if (owner && owner !== r.id) fail('That transaction is already recorded against ' + owner, 409);
+    if (r.txHash && r.txHash !== h && mode !== 'replace' && owner !== r.id) {
+      fail('This record already has a different transaction (' + Thc.shortAddress(r.txHash) + '). Send again only if that one was dropped.', 409);
+    }
+    // Every recorded transaction is checked on-chain whenever the record is, so keep unconfirmed ones few.
+    // One the chain shows has arrived is always recorded: it is a real payment and has to be booked.
+    if (owner !== r.id && !arrived && claimedHashes(r).length >= MAX_TX_PER_RECORD) {
+      fail('This already has ' + MAX_TX_PER_RECORD + ' transactions recorded against it, so another one can only be added once it is confirmed on-chain. Press "Check again" (one of them may have arrived), and attach this one once it confirms. If none went through, ' + (r.worker ? 'mark the payout as dropped.' : 'cancel it.'), 409);
+    }
+    return h;
+  }
+  function pointAt(state, r, h) {
+    if (r.txHash && r.txHash !== h) r.previousTx = (r.previousTx || []).concat(r.txHash);
+    r.txHash = h;
+    state.thc.usedTx[h] = r.id;
+  }
+  /** Every transaction recorded against a payout or payment, newest first. Any of them may still settle it. */
+  function claimedHashes(r) {
+    const out = [];
+    [r.txHash].concat((r.previousTx || []).slice().reverse()).forEach(function (h) { if (h && out.indexOf(h) < 0) out.push(h); });
+    return out;
+  }
+  function verifyFor(r, h, rc, senders) {
+    return Thc.verifyTransfer(rc, { txHash: h, to: r.to, from: senders, notBefore: Math.floor(r.createdAt / 1000) - TIME_SLACK_S });
+  }
+  /**
+   * What the chain says about every transaction recorded against r. args.chain maps each hash to its
+   * receipt, { pending: true } while the network still holds it unmined, or null if the chain doesn't
+   * have it. On the server it is always built by the server itself (see server.js). Every recorded hash
+   * must have been looked up, so a transaction attached meanwhile can't be missed.
+   */
+  function chainResults(state, refType, r, args) {
+    if (!args.chain || typeof args.chain !== 'object') fail('Look up this ' + refType + '\'s transactions on-chain first', 400);
+    const map = Object.create(null);
+    Object.keys(args.chain).forEach(function (k) { if (Thc.isTxHash(k)) map[k.toLowerCase()] = args.chain[k] || null; });
+    const senders = sendersFor(state, refType, r);
+    if (!senders.length) fail('Set the ' + netLabel(r.network) + ' treasury first (Ops & pay → THC treasury)', 409);
+    return claimedHashes(r).map(function (h) {
+      if (!(h in map)) fail('This ' + refType + ' has a transaction that wasn\'t checked (' + Thc.shortAddress(h) + '). Check it again first.', 409);
+      const pending = !!(map[h] && map[h].pending === true);
+      const rc = pending ? null : map[h];
+      return { h: h, rc: rc, pending: pending, v: verifyFor(r, h, rc, senders) };
+    });
+  }
+  /** Which transfers of a payout are on the books (hash -> ledger entry). Older saves only booked txHash. */
+  function accountedOf(r) {
+    if (!r.accounted) {
+      r.accounted = {};
+      if (r.status === 'confirmed' && r.txHash) r.accounted[r.txHash] = r.ledgerId;
+    }
+    return r.accounted;
+  }
+  /** A second transfer that reached the worker for an already-paid payout (it was sent twice): it really left the treasury, so it goes on the books. */
+  function recordExtraTransfer(state, r, h, v, now) {
+    // A full second payment is worth what the payout was; anything smaller, what arrived at the payout's rate.
+    const cents = v.received >= BigInt(r.units) ? r.cents : Math.min(r.cents, Thc.unitsToCents(v.received, r.rateE18));
+    const e = addLedger(state, r.worker, 'payout', -cents, r.id, 'THC payout ' + r.id + ' sent twice · extra tx ' + Thc.shortAddress(h), 'paid', now);
+    accountedOf(r)[h] = e ? e.id : 'under a cent'; // nothing to book, but it is accounted for
+    r.extraUnits = (BigInt(r.extraUnits || '0') + v.received).toString();
+    const left = balances(state, r.worker).available;
+    r.note = 'Sent twice: another ' + fmtThc(v.received) + ' arrived in ' + Thc.shortAddress(h) + (left < 0 ? ', leaving ' + workerName(state, r.worker) + ' at ' + money(left) + ' until new earnings cover it' : '');
+    log(state, 'payout', 'THC payout ' + r.id + ' was sent twice: another ' + fmtThc(v.received) + ' reached ' + workerName(state, r.worker) + ' (tx ' + Thc.shortAddress(h) + ')', now);
+  }
+  function recordView(state, refType, r) { return refType === 'payout' ? thcPayoutView(state, r) : thcInvoiceView(state, r); }
+
+  function createSponsoredBounty(state, inv, receivedUnits, now) {
+    const rate = Math.min(sponsorRateCents(state, inv.skill), inv.creditCents);
+    const target = Math.max(1, Math.floor(inv.creditCents / rate));
+    const who = (inv.sponsor ? inv.sponsor + ' ' : '') + '(' + Thc.shortAddress(inv.payer) + ')';
+    const b = newBounty(state, {
+      kind: 'skill', mode: 'teleop', skill: inv.skill, unit: 'demo', target: target, rateCents: rate, severity: 0.3,
+      title: Sim.SKILLS[inv.skill].name + ': THC-sponsored demos',
+      reason: 'Funded with ' + fmtThc(receivedUnits) + ' (' + money(inv.creditCents) + ') by ' + who + ' on ' + netLabel(inv.network) + '. Open until filled.',
+      sponsored: { invoice: inv.id, payer: inv.payer, network: inv.network, txHash: inv.txHash, cents: inv.creditCents, units: receivedUnits.toString() },
+    }, now);
+    log(state, 'bounty', 'New THC-sponsored bounty: ' + target + ' "' + Sim.SKILLS[inv.skill].name + '" demos at ' + money(rate) + ', funded with ' + fmtThc(receivedUnits), now);
+    return b;
+  }
+
+  function opThc(box, args) {
+    const state = box.state;
+    const t = state.thc;
+    const w = args.workerId ? getWorker(state, args.workerId) : null;
+    const paid = { sim: 0n, bsc: 0n }, received = { sim: 0n, bsc: 0n };
+    let queued = 0, submitted = 0;
+    t.payouts.forEach(function (p) {
+      if (p.status === 'confirmed') paid[p.network] += BigInt(p.receivedUnits || p.units) + BigInt(p.extraUnits || '0');
+      if (p.status === 'queued') queued++;
+      if (p.status === 'submitted') submitted++;
+    });
+    t.invoices.forEach(function (inv) { if (inv.status === 'paid') received[inv.network] += BigInt(inv.receivedUnits || '0'); });
+    // The newest records, plus every older one still in progress, so nothing in flight drops out of view.
+    const listed = function (list, view) {
+      const older = list.slice(0, Math.max(0, list.length - 60)).filter(function (x) { return !FINISHED[x.status]; });
+      return older.concat(list.slice(-60)).reverse().map(function (x) { return view(state, x); });
+    };
+    const last = state.shifts[state.shifts.length - 1] || null;
+    return {
+      token: Thc.TOKEN, rate: rateView(t), feePct: t.feePct, maxTxUnits: t.maxTxUnits, maxTx: Thc.formatUnits(t.maxTxUnits, 0), chainInfoAt: t.chainInfoAt,
+      treasury: Object.assign({}, t.treasury),
+      totals: { paid: { sim: paid.sim.toString(), bsc: paid.bsc.toString() }, received: { sim: received.sim.toString(), bsc: received.bsc.toString() }, queued: queued, submitted: submitted },
+      payouts: listed(t.payouts, thcPayoutView),
+      invoices: listed(t.invoices, thcInvoiceView),
+      worker: w ? { id: w.id, name: w.name, simulated: !!w.simulated, wallets: Object.assign({}, w.wallets), payoutMethod: w.payoutMethod, thcNetwork: thcNetworkFor(w), payout: w.payout, balances: balances(state, w.id) } : null,
+      skills: activeSkills(state).map(function (sk) {
+        const st = last && last.bySkill[sk];
+        return { id: sk, name: Sim.SKILLS[sk].name, fleetSuccess: st && st.n ? r3(st.ok / st.n) : null, demos: approvedCount(state, sk), rateCents: sponsorRateCents(state, sk) };
+      }),
+      sponsored: state.bounties.filter(function (b) { return b.sponsored; }).slice(-20).reverse().map(function (b) { return bountyView(state, b, null); }),
+    };
+  }
+  function opLinkWallet(box, args, now) {
+    const state = box.state;
+    const w = getWorker(state, args.workerId);
+    const network = checkNetwork(String(args.network || ''));
+    const address = checkAddress(args.address);
+    const other = state.workers.find(function (x) { return x.id !== w.id && x.wallets && x.wallets[network] === address; });
+    if (other) fail('That wallet is already linked to ' + other.name, 409);
+    w.wallets[network] = address;
+    if (args.makeDefault !== false) { w.payoutMethod = 'thc'; w.thcNetwork = network; }
+    log(state, 'system', w.name + ' linked a ' + netLabel(network) + ' wallet (' + Thc.shortAddress(address) + ') for THC payouts', now);
+    return { worker: workerView(w) };
+  }
+  function opUnlinkWallet(box, args) {
+    const w = getWorker(box.state, args.workerId);
+    const network = checkNetwork(String(args.network || ''));
+    if (!w.wallets[network]) fail('No ' + netLabel(network) + ' wallet is linked', 404);
+    delete w.wallets[network];
+    if (w.thcNetwork === network) w.thcNetwork = null;
+    if (w.payoutMethod === 'thc' && !thcNetworkFor(w)) w.payoutMethod = 'bank';
+    return { worker: workerView(w) };
+  }
+  function opSetPayoutMethod(box, args) {
+    const w = getWorker(box.state, args.workerId);
+    if (args.method !== 'bank' && args.method !== 'thc') fail('method must be "bank" or "thc"');
+    if (args.method === 'thc') {
+      const net = args.network ? checkNetwork(String(args.network)) : thcNetworkFor(w);
+      if (!net || !w.wallets[net]) fail('Link a wallet before choosing THC payouts', 409);
+      w.thcNetwork = net;
+    }
+    w.payoutMethod = args.method;
+    return { worker: workerView(w) };
+  }
+  function opSetThcRate(box, args, now) {
+    const v = Number(args.usdPerThc);
+    if (!Number.isFinite(v) || v < 1e-12 || v > 1e6) fail('usdPerThc must be a price between 0.000000000001 and 1,000,000 USD');
+    const t = box.state.thc;
+    t.rateE18 = Thc.rateToE18(v).toString();
+    t.rateSource = typeof args.source === 'string' && args.source.trim() ? args.source.replace(/[<>]/g, '').trim().slice(0, 40) : 'Manual';
+    t.rateAt = now;
+    return { rate: rateView(t) };
+  }
+  function opSetThcChainInfo(box, args, now) {
+    const t = box.state.thc;
+    const fee = Number(args.feePct);
+    if (!Number.isInteger(fee) || fee < 0 || fee > 50) fail('feePct must be a whole percentage between 0 and 50');
+    let max;
+    try { max = Thc.toBig(String(args.maxTxUnits)); } catch (e) { fail('maxTxUnits must be an integer amount of base units'); }
+    if (max <= 0n || max > THC_SUPPLY_UNITS) fail('maxTxUnits must be positive and no more than THC\'s total supply');
+    t.feePct = fee; t.maxTxUnits = max.toString(); t.chainInfoAt = now;
+    return { feePct: t.feePct, maxTxUnits: t.maxTxUnits, maxTx: Thc.formatUnits(t.maxTxUnits, 0), chainInfoAt: now };
+  }
+  function opSetTreasury(box, args, now) {
+    const t = box.state.thc;
+    const network = checkNetwork(String(args.network || ''));
+    if (network !== 'bsc') fail('The simulated chain always uses the built-in demo treasury');
+    t.treasury[network] = checkAddress(args.address);
+    log(box.state, 'system', 'THC treasury on ' + netLabel(network) + ' set to ' + Thc.shortAddress(t.treasury[network]), now);
+    return { treasury: Object.assign({}, t.treasury) };
+  }
+  function opCreateThcInvoice(box, args, now) {
+    const state = box.state;
+    const t = state.thc;
+    const network = checkNetwork(String(args.network || ''));
+    const treasury = t.treasury[network];
+    if (!treasury) fail('The platform has no ' + netLabel(network) + ' treasury yet. Set one in Ops & pay → THC treasury.', 409);
+    const payer = checkAddress(args.payer);
+    const skill = String(args.skill || '');
+    if (activeSkills(state).indexOf(skill) < 0) fail('Pick a skill the fleet is working on');
+    const cents = Math.round(Number(args.usdCents));
+    if (!Number.isFinite(cents) || cents < 100 || cents > 100000) fail('Sponsorships are between $1 and $1,000');
+    const units = Thc.centsToUnits(cents, t.rateE18, true);
+    const gross = Thc.grossUp(units, t.feePct);
+    if (gross > BigInt(t.maxTxUnits)) fail('That is more than THC allows in one transfer (' + Thc.formatUnits(t.maxTxUnits, 0) + ' THC). Choose a smaller amount.', 409);
+    const sponsor = args.workerId ? state.workers.find(function (x) { return x.id === args.workerId; }) : null;
+    expireInvoices(state, now);
+    const unfinished = t.invoices.filter(function (i) { return !FINISHED[i.status]; });
+    if (unfinished.length >= MAX_OPEN_INVOICES) fail('Too many THC payments are waiting to be paid. Try again later.', 429);
+    if (unfinished.filter(function (i) { return i.payer === payer; }).length >= MAX_OPEN_INVOICES_PER_PAYER) {
+      fail('This wallet already has ' + MAX_OPEN_INVOICES_PER_PAYER + ' THC payments in progress. Finish or cancel those first.', 429);
+    }
+    const inv = {
+      id: nextId(state, 'ti'), kind: 'sponsor', network: network, payer: payer, to: treasury, skill: skill, cents: cents,
+      units: units.toString(), grossUnits: gross.toString(), rateE18: t.rateE18, feePct: t.feePct, status: 'open', createdAt: now,
+      txHash: null, receivedUnits: null, creditCents: null, bounty: null, sponsor: sponsor ? sponsor.name : null,
+    };
+    t.invoices.push(inv);
+    trimRecords(t.invoices);
+    return { invoice: thcInvoiceView(state, inv) };
+  }
+
+  // Lifecycle: queued/open -> sending (locked while one window's wallet signs) -> submitted (hash recorded)
+  //            -> confirmed/paid, or failed (its latest transaction reverted), or back to queued/open if
+  //            nothing was sent. A failed or expired record can take a replacement transaction and recover.
+  /** Lock a payout or payment before its transfer is signed. Only the returned token can submit or release it. */
+  function opStartThcTx(box, args, now) {
+    const state = box.state;
+    const r = findThcRecord(state, args.refType, args.refId);
+    const resend = args.resend === true && r.status === 'submitted';
+    if (r.status !== 'queued' && r.status !== 'open' && !resend) {
+      fail(r.status === 'sending' ? 'This ' + args.refType + ' is already being sent from another window' : 'This ' + args.refType + ' is ' + r.status, 409);
+    }
+    if (resend && claimedHashes(r).length >= MAX_TX_PER_RECORD) {
+      // Another transfer couldn't be recorded, so don't let a wallet send one.
+      fail('This ' + args.refType + ' already has ' + MAX_TX_PER_RECORD + ' transactions recorded against it, so it can\'t be sent again. Press "Check again"' + (args.refType === 'payout' ? ', or mark it as dropped if none of them went through' : '') + '.', 409);
+    }
+    if (args.refType === 'payout' && !state.thc.treasury[r.network]) fail('Set the ' + netLabel(r.network) + ' treasury first (Ops & pay → THC treasury)', 409);
+    if (args.refType === 'payout' && resend) {
+      // Send again only once none of the earlier transactions reached the worker or could still be mined.
+      const res = chainResults(state, 'payout', r, args);
+      const arrived = res.filter(function (x) { return x.v.ok; })[0];
+      if (arrived) fail('Transaction ' + Thc.shortAddress(arrived.h) + ' already reached ' + workerName(state, r.worker) + '. Press "Check again" to record it instead of sending again.', 409);
+      const waiting = res.filter(function (x) { return x.pending; })[0];
+      if (waiting) fail('Transaction ' + Thc.shortAddress(waiting.h) + ' is still waiting to be mined. Speed it up or cancel it in your wallet instead of sending again.', 409);
+    }
+    if (args.refType === 'payout') {
+      // A failed payout that went through after all can leave a worker overdrawn. Then nothing new is sent
+      // to them until that's covered. "Send again" re-sends money this payout already reserved, so it's
+      // allowed only while unsent payouts, which can still be cancelled, cover the gap.
+      const available = balances(state, r.worker).available;
+      const unsent = resend ? state.thc.payouts.reduce(function (s, p) { return s + (p.worker === r.worker && p.status === 'queued' ? p.cents : 0); }, 0) : 0;
+      if (available + unsent < 0) {
+        fail(resend
+          ? 'Sending this again could pay ' + workerName(state, r.worker) + ' twice: their balance is ' + money(available) + ' because money from a failed payout went out again. If this transaction was dropped, mark it as dropped instead.'
+          : workerName(state, r.worker) + '\'s balance is ' + money(available) + ': a THC payout that had failed went through after they had cashed out again, so no more THC can be sent to them until that is covered. Cancel payouts that haven\'t been sent, then cash out what is left.', 409);
+      }
+    }
+    r.resumeStatus = r.status; r.status = 'sending'; r.sendingAt = now; r.lock = newLockToken();
+    return { record: recordView(state, args.refType, r), lock: r.lock };
+  }
+  /**
+   * Undo a lock when nothing was sent. The window holding the lock can always release it; anyone else
+   * only with force, once the lock is older than LOCK_TTL (its window was closed or crashed).
+   */
+  function opReleaseThcTx(box, args, now) {
+    const state = box.state;
+    const r = findThcRecord(state, args.refType, args.refId);
+    if (r.status !== 'sending') fail('This ' + args.refType + ' is not being sent', 409);
+    if (!holdsLock(r, args) && !(args.force === true && lockStale(r, now))) {
+      fail('Another window is sending this right now. If that window was closed, it can be released ' + Math.ceil((LOCK_TTL - (now - r.sendingAt)) / MIN) + ' min from now.', 409);
+    }
+    r.status = r.resumeStatus || (args.refType === 'payout' ? 'queued' : 'open');
+    clearLock(r);
+    return { record: recordView(state, args.refType, r) };
+  }
+  function opSubmitThcTx(box, args, now) {
+    const state = box.state;
+    const r = findThcRecord(state, args.refType, args.refId);
+    const allowed = ['queued', 'open', 'sending', 'submitted'].concat(args.replace === true ? ['failed', 'expired'] : []);
+    if (allowed.indexOf(r.status) < 0) fail('This ' + args.refType + ' is already ' + r.status, 409);
+    if (r.status === 'sending' && !holdsLock(r, args) && !lockStale(r, now)) fail('Another window is sending this right now', 409);
+    const replace = args.replace === true || (r.status === 'sending' && r.resumeStatus === 'submitted');
+    // args.proof: the new transaction's receipt (fetched by the server itself), needed past the per-record limit
+    const newHash = Thc.isTxHash(args.txHash || '') ? args.txHash.toLowerCase() : null;
+    const arrived = !!(newHash && args.proof && typeof args.proof === 'object' && verifyFor(r, newHash, args.proof, sendersFor(state, args.refType, r)).ok);
+    const h = claimTx(state, r, args.txHash, replace ? 'replace' : null, arrived);
+    if (args.refType === 'payout' && r.status === 'failed') reservePayoutLedger(state, r);
+    pointAt(state, r, h);
+    r.status = 'submitted'; r.submittedAt = now;
+    delete r.dropped;
+    clearLock(r);
+    return { record: recordView(state, args.refType, r) };
+  }
+  /**
+   * Settle a payout or payment from the receipt of a transaction recorded against it. On the server the
+   * receipt is always fetched by the server itself (see server.js), never taken from the client.
+   * Only THC sent by the expected party (the treasury for payouts, the payer for payments) after the
+   * request was made counts, and only what actually arrived is credited.
+   */
+  function opSettleThc(box, args, now) {
+    const state = box.state;
+    const isPayout = args.refType === 'payout';
+    const r = findThcRecord(state, args.refType, args.refId);
+    const done = r.status === 'confirmed' || r.status === 'paid';
+    if (r.status === 'sending') fail('This ' + args.refType + ' is being sent right now. Check it once the wallet has finished.', 409);
+    if (!done && ['submitted', 'failed', 'expired'].indexOf(r.status) < 0) fail('This ' + args.refType + ' is ' + r.status + '; record its transaction first', 409);
+    let results;
+    if (args.chain != null) {
+      // Every transaction recorded against it, as the chain sees them (the server always settles this way).
+      results = chainResults(state, args.refType, r, args);
+      if (!results.length) fail('Record this ' + args.refType + '\'s transaction before checking it', 409);
+    } else {
+      // One transaction and its receipt (in the browser build, where the browser is the platform).
+      const h = Thc.isTxHash(args.txHash || '') ? args.txHash.toLowerCase() : (r.txHash || '');
+      if (!Thc.isTxHash(h) || state.thc.usedTx[h] !== r.id) fail('Record this transaction against the ' + args.refType + ' before checking it', 409);
+      const senders = sendersFor(state, args.refType, r);
+      if (!senders.length) fail('Set the ' + netLabel(r.network) + ' treasury first (Ops & pay → THC treasury)', 409);
+      const pending = !!(args.receipt && args.receipt.pending === true);
+      const rc = pending ? null : (args.receipt || null);
+      results = [{ h: h, rc: rc, pending: pending, v: verifyFor(r, h, rc, senders) }];
+    }
+    const arrived = results.filter(function (x) { return x.v.ok; });
+    if (done) {
+      // Already settled. Another recorded transfer that also reached the worker was a second payment: book it.
+      const extra = isPayout ? arrived.filter(function (x) { return !accountedOf(r)[x.h]; }) : [];
+      extra.forEach(function (x) { recordExtraTransfer(state, r, x.h, x.v, now); });
+      return { record: recordView(state, args.refType, r), already: !extra.length };
+    }
+    if (arrived.length) {
+      // The largest transfer that arrived settles it (newest first among equals); any others are extras.
+      arrived.sort(function (a, b) { return a.v.received === b.v.received ? 0 : (b.v.received > a.v.received ? 1 : -1); });
+      const out = confirmThc(state, args.refType, r, arrived[0].h, arrived[0].v, now);
+      if (isPayout) arrived.slice(1).forEach(function (x) { recordExtraTransfer(state, r, x.h, x.v, now); });
+      else if (arrived.length > 1) r.note = 'Another transfer also arrived (' + Thc.shortAddress(arrived[1].h) + '), but only one counts for this payment';
+      out.record = recordView(state, args.refType, r);
+      return out;
+    }
+    const waiting = results.filter(function (x) { return x.pending; })[0];
+    const x = results[0];
+    if (x.v.reverted && !waiting) {
+      // Only the latest attempt, a failed THC transfer sent by the expected party, can fail the record,
+      // and only once no other attempt could still be mined.
+      if (x.h !== r.txHash) fail('An earlier attempt failed, but the latest transaction (' + Thc.shortAddress(r.txHash || '') + ') is the one that counts', 409);
+      const senders = sendersFor(state, args.refType, r);
+      const fromOk = senders.some(function (a) { return Thc.sameHex(x.rc.from, a); });
+      if (!Thc.sameHex(x.rc.to, Thc.TOKEN.address) || !fromOk) fail('That failed transaction is not a THC transfer from ' + senders.map(Thc.shortAddress).join(' or '), 422);
+      if (r.status === 'failed') {
+        if (r.dropped) { delete r.dropped; r.note = x.v.reason; } // the "dropped" transaction was mined after all, and failed
+        return { record: recordView(state, args.refType, r), failed: true, already: true };
+      }
+      r.status = 'failed'; r.note = x.v.reason; r.settledAt = now;
+      if (isPayout) voidPayoutLedger(state, r);
+      log(state, 'payout', 'THC ' + args.refType + ' ' + r.id + ' failed on-chain; ' + (isPayout ? 'the money is back in the worker\'s balance' : 'nothing was received'), now);
+      return { record: recordView(state, args.refType, r), failed: true };
+    }
+    if (waiting) fail('Transaction ' + Thc.shortAddress(waiting.h) + ' is still waiting to be mined. Check again once it is.', 409);
+    if (x.v.pending) fail('The transaction is not confirmed yet. Try again in a few seconds.', 409);
+    fail(x.v.reason, 422);
+  }
+  /** Settle a payout or payment with a transfer that verified. Only what actually arrived counts. */
+  function confirmThc(state, refType, r, h, v, now) {
+    const revived = r.status === 'failed' || r.status === 'expired'; // a replacement or late transfer went through
+    pointAt(state, r, h);
+    r.receivedUnits = v.received.toString(); r.from = v.from; r.blockNumber = v.blockNumber; r.settledAt = now; r.note = null;
+    delete r.dropped;
+    if (refType === 'payout') {
+      r.status = 'confirmed';
+      accountedOf(r)[h] = r.ledgerId;
+      const w = state.workers.find(function (x) { return x.id === r.worker; });
+      const e = state.ledger.find(function (x) { return x.id === r.ledgerId; });
+      let paidCents = r.cents;
+      if (v.received < BigInt(r.units)) {
+        // Arrived short (e.g. THC's transfer fee went up): only what arrived counts as paid.
+        paidCents = Math.min(r.cents, Thc.unitsToCents(v.received, r.rateE18));
+        r.shortfallUnits = (BigInt(r.units) - v.received).toString();
+        r.note = 'Arrived ' + fmtThc(r.shortfallUnits) + ' short; ' + money(r.cents - paidCents) + ' went back to the available balance';
+      }
+      if (e) {
+        // A transfer that confirms after its payout failed (its money already released) is still a real payment.
+        const late = e.status === 'void';
+        e.status = 'paid';
+        e.cents = -paidCents;
+        e.memo += ' · tx ' + Thc.shortAddress(h) + (revived || r.reattached ? ' (went through after an earlier attempt failed)' : '');
+        const left = late || r.reattached ? balances(state, r.worker).available : 0;
+        if (left < 0) r.note = (r.note ? r.note + '. ' : '') + 'Went through after it had failed, leaving ' + workerName(state, r.worker) + ' at ' + money(left) + ' until new earnings cover it';
+      }
+      log(state, 'payout', 'Treasury paid ' + (w ? w.name : r.worker) + ' ' + fmtThc(v.received) + ' on ' + netLabel(r.network) + ' (tx ' + Thc.shortAddress(h) + ')' + (r.shortfallUnits ? ', short of the ' + fmtThc(r.units) + ' due' : ''), now);
+      return { record: recordView(state, 'payout', r) };
+    }
+    r.status = 'paid';
+    r.creditCents = Math.min(r.cents, Thc.unitsToCents(v.received, r.rateE18));
+    const b = r.creditCents > 0 ? createSponsoredBounty(state, r, v.received, now) : null;
+    r.bounty = b ? b.id : null;
+    return { record: recordView(state, 'invoice', r), bounty: b ? bountyView(state, b, null) : null };
+  }
+  function opCancelThc(box, args, now) {
+    const state = box.state;
+    const r = findThcRecord(state, args.refType, args.refId);
+    // Payouts reserve a worker's money, so only unsent ones can be cancelled. A payment into the treasury
+    // reserves nothing, so a payer may also abandon one stuck in "confirming" or expired. Nothing being
+    // signed right now ("sending") can be cancelled.
+    const cancellable = r.status === 'queued' || r.status === 'open' || (args.refType === 'invoice' && (r.status === 'submitted' || r.status === 'expired'));
+    if (!cancellable) fail(r.status === 'sending' ? 'This is being sent right now, so it cannot be cancelled' : 'Only payouts that have not been sent can be cancelled', 409);
+    r.status = 'cancelled'; r.settledAt = now; r.note = 'Cancelled';
+    if (args.refType === 'payout') voidPayoutLedger(state, r);
+    return { record: recordView(state, args.refType, r) };
+  }
+  /**
+   * The treasury says a payout's transaction was dropped (replaced or cancelled in its wallet), so the
+   * payout fails and its money goes back to the worker. Every transaction recorded against it is checked
+   * on-chain first (args.chain, built by the server itself on the server): if any reached the worker or
+   * could still be mined, it wasn't dropped. Unlike a cancellation, its transactions stay claimed, so one
+   * that goes through after all can still be settled.
+   */
+  function opDropThcTx(box, args, now) {
+    const state = box.state;
+    if (args.refType !== 'payout') fail('Only payouts can be marked as dropped. Cancel a payment instead.');
+    const r = findThcRecord(state, 'payout', args.refId);
+    if (r.status !== 'submitted') fail('Only a payout waiting for its transaction to confirm can be marked as dropped (this one is ' + r.status + ')', 409);
+    const res = chainResults(state, 'payout', r, args);
+    const arrived = res.filter(function (x) { return x.v.ok; })[0];
+    if (arrived) fail('Transaction ' + Thc.shortAddress(arrived.h) + ' already reached ' + workerName(state, r.worker) + ', so this payout wasn\'t dropped. Press "Check again" to record it.', 409);
+    const waiting = res.filter(function (x) { return x.pending; })[0];
+    if (waiting) fail(netLabel(r.network) + ' still has transaction ' + Thc.shortAddress(waiting.h) + ' waiting to be mined, so it hasn\'t been dropped. Wait for it, or cancel it in your wallet first.', 409);
+    r.status = 'failed'; r.settledAt = now; r.dropped = true;
+    r.note = 'Marked as dropped by the treasury, so the money went back to the balance. If the transaction goes through after all, "Check again" still records it.';
+    voidPayoutLedger(state, r);
+    log(state, 'payout', 'Treasury marked THC payout ' + r.id + ' as dropped; ' + money(r.cents) + ' is back in ' + workerName(state, r.worker) + '\'s balance', now);
+    return { record: recordView(state, 'payout', r) };
+  }
+
   const OPS = {
     health: function (box) { return { ok: true, schema: SCHEMA, shiftNo: box.state.shiftNo }; },
     overview: opOverview,
@@ -1305,6 +1909,10 @@
     submitGlasses: opSubmitGlasses, reviewQueue: opReviewQueue, reviewSession: opReviewSession,
     lab: opLab, runShift: opRunShift, train: opTrain, deploy: opDeploy, rollout: opRollout, runCycle: opRunCycle,
     ops: opOps, payout: opPayout, payAll: opPayAll, updateConfig: opUpdateConfig, onboardSite: opOnboardSite, reset: opReset,
+    thc: opThc, linkWallet: opLinkWallet, unlinkWallet: opUnlinkWallet, setPayoutMethod: opSetPayoutMethod,
+    setThcRate: opSetThcRate, setThcChainInfo: opSetThcChainInfo, setTreasury: opSetTreasury,
+    createThcInvoice: opCreateThcInvoice, startThcTx: opStartThcTx, releaseThcTx: opReleaseThcTx,
+    submitThcTx: opSubmitThcTx, settleThc: opSettleThc, cancelThc: opCancelThc, dropThcTx: opDropThcTx,
   };
 
   const ROUTES = [
@@ -1333,6 +1941,20 @@
     { op: 'updateConfig', method: 'PATCH', path: '/api/config' },
     { op: 'onboardSite', method: 'POST', path: '/api/sites' },
     { op: 'reset', method: 'POST', path: '/api/reset' },
+    { op: 'thc', method: 'GET', path: '/api/thc' },
+    { op: 'linkWallet', method: 'POST', path: '/api/workers/:workerId/wallets' },
+    { op: 'unlinkWallet', method: 'DELETE', path: '/api/workers/:workerId/wallets/:network' },
+    { op: 'setPayoutMethod', method: 'PATCH', path: '/api/workers/:workerId/payout-method' },
+    { op: 'setThcRate', method: 'PATCH', path: '/api/thc/rate' },
+    { op: 'setThcChainInfo', method: 'PATCH', path: '/api/thc/chain-info' },
+    { op: 'setTreasury', method: 'PATCH', path: '/api/thc/treasury' },
+    { op: 'createThcInvoice', method: 'POST', path: '/api/thc/invoices' },
+    { op: 'startThcTx', method: 'POST', path: '/api/thc/start' },
+    { op: 'releaseThcTx', method: 'POST', path: '/api/thc/release' },
+    { op: 'submitThcTx', method: 'POST', path: '/api/thc/tx' },
+    { op: 'settleThc', method: 'POST', path: '/api/thc/settle' },
+    { op: 'cancelThc', method: 'POST', path: '/api/thc/cancel' },
+    { op: 'dropThcTx', method: 'POST', path: '/api/thc/drop' },
   ];
 
   function matchRoute(method, pathname) {
@@ -1374,6 +1996,7 @@
   function dispatch(box, op, args, ctx) {
     if (!Object.prototype.hasOwnProperty.call(OPS, op)) fail('Unknown operation: ' + op, 404);
     ctx = ctx || {};
+    ensureThc(box.state);
     return OPS[op](box, args || {}, ctx.now || Date.now(), ctx);
   }
 
@@ -1381,7 +2004,13 @@
     SCHEMA: SCHEMA, LoopError: LoopError, ROUTES: ROUTES, DEFAULT_CONFIG: DEFAULT_CONFIG,
     createState: createState, createRuntime: createRuntime, dispatch: dispatch, matchRoute: matchRoute, buildRequest: buildRequest,
     isMutating: function (op) { const r = ROUTES.find(function (x) { return x.op === op; }); return !!r && r.method !== 'GET'; },
+    /** Server helper: the payout or invoice a settlement refers to (to fetch its receipts from the right chain). */
+    thcRecord: function (box, refType, refId) { return findThcRecord(box.state, refType, refId); },
+    /** Every transaction recorded against a payout or payment (record or view), newest first. */
+    claimedHashes: claimedHashes,
+    /** Unconfirmed transactions that can be recorded against one payout or payment. */
+    MAX_TX_PER_RECORD: MAX_TX_PER_RECORD,
     // exposed for tests and tooling
-    _internals: { balances: balances, teleopLevel: teleopLevel, fleetMix: fleetMix, glassesQa: glassesQa, priceTeleop: priceTeleop, policyFor: policyFor },
+    _internals: { balances: balances, teleopLevel: teleopLevel, fleetMix: fleetMix, glassesQa: glassesQa, priceTeleop: priceTeleop, policyFor: policyFor, ensureThc: ensureThc },
   };
 });

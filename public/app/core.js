@@ -92,7 +92,7 @@ window.LW = window.LW || {};
           body: req.body ? JSON.stringify(req.body) : undefined,
         });
         const data = await res.json().catch(function () { return {}; });
-        if (!res.ok) throw new Error(data.error || 'Request failed (' + res.status + ')');
+        if (!res.ok) throw Object.assign(new Error(data.error || 'Request failed (' + res.status + ')'), { status: res.status });
         return data;
       }
       if (op === 'runCycle') {

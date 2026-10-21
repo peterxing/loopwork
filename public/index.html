@@ -207,6 +207,9 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
 th { font-size: 11.5px; color: var(--cp-text-muted); font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; }
 tr:last-child td { border-bottom: 0; }
+tr.has-fix td { border-bottom: 0; padding-bottom: 2px; }
+tr.fix td { padding-top: 0; }
+td.act .btn, tr.fix .btn { white-space: nowrap; }
 .table-wrap { overflow-x: auto; }
 
 /* loop diagram */
@@ -319,6 +322,15 @@ tr:last-child td { border-bottom: 0; }
 .prose h2 { margin: 18px 0 8px; }
 .prose ul { padding-left: 20px; margin: 6px 0; }
 
+/* THC wallet */
+.wallet-opts { display: grid; gap: 8px; }
+.wallet-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--cp-border); border-radius: 12px; background: var(--cp-surface); color: var(--cp-text); font: inherit; cursor: pointer; text-align: left; }
+.wallet-opt:hover { border-color: var(--cp-accent); background: var(--cp-accent-soft); }
+.wallet-opt img, .wallet-opt .wicon { width: 30px; height: 30px; border-radius: 8px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--cp-surface-soft); font-size: 17px; }
+.wallet-icon { width: 22px; height: 22px; border-radius: 6px; }
+.addr { font-family: Consolas, "Courier New", Courier, monospace; font-size: 12.5px; }
+.thc-hero .hero-metric .big { font-size: 30px; }
+
 /* loop as a list (narrow screens) */
 .loop-list { display: none; list-style: none; margin: 0; padding: 0; }
 .loop-list .loop-node { border: 1px solid var(--cp-border); border-radius: 12px; margin-bottom: 8px; background: var(--cp-surface); transition: background 0.2s, border-color 0.2s; }
@@ -337,7 +349,7 @@ tr:last-child td { border-bottom: 0; }
   .grid.two, .grid.three, .grid.wide-left, .grid.wide-right, .hero { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 1100px) { .teleop { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 1399px) {
+@media (max-width: 1439px) {
   .topbar { flex-wrap: wrap; gap: 6px 10px; padding-bottom: 0; }
   .tabs { order: 3; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -24px; padding: 0 24px 8px; }
   .tabs::-webkit-scrollbar { display: none; }
@@ -382,6 +394,7 @@ tr:last-child td { border-bottom: 0; }
     <a data-route="worker" href="#/worker">Worker app</a>
     <a data-route="teleop" href="#/teleop">Teleoperate</a>
     <a data-route="glasses" href="#/glasses">Smart glasses</a>
+    <a data-route="wallet" href="#/wallet">THC wallet</a>
     <a data-route="lab" href="#/lab">Robot lab</a>
     <a data-route="ops" href="#/ops">Ops &amp; pay</a>
     <a data-route="about" href="#/about">How it works</a>
@@ -398,6 +411,8 @@ tr:last-child td { border-bottom: 0; }
 
 <script src="lib/sim.js"></script>
 <script src="lib/policy.js"></script>
+<script src="lib/thc.js"></script>
+<script src="lib/chain.js"></script>
 <script src="lib/engine.js"></script>
 <script src="app/core.js"></script>
 <script src="app/scene.js"></script>
@@ -407,6 +422,7 @@ tr:last-child td { border-bottom: 0; }
 <script src="app/glasses.js"></script>
 <script src="app/lab.js"></script>
 <script src="app/ops.js"></script>
+<script src="app/wallet.js"></script>
 <script src="app/main.js"></script>
 </body>
 </html>

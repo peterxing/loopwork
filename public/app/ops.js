@@ -47,7 +47,7 @@
         kpi('Quality bonuses', LW.money(t.byKind.quality), 'QA multiplier ×0.7–1.3') +
         kpi('Data dividends', LW.money(t.byKind.royalty), Math.round(cfg.royaltyRate * 100) + '% of fleet revenue') +
         kpi('Pending review', LW.money(t.pending), ops.review.length + ' sessions in queue') +
-        kpi('Paid out', LW.money(t.paidOut), 'instant & batch payouts') +
+        kpi('Paid out', LW.money(t.paidOut), t.processing ? LW.money(t.processing) + ' more on its way in THC' : 'instant & batch payouts') +
       '</section>' +
       '<section class="grid wide-left">' +
         '<div class="card"><div class="card-head"><h2>Review queue</h2><span class="small muted">low-QA or flagged sessions; bonus pay waits for a decision</span></div>' +
@@ -70,11 +70,12 @@
       '</section>' +
       '<section class="card"><div class="card-head"><h2>Contributor balances</h2><button class="btn" data-act="payall">🏦 Run payout batch</button></div><div class="table-wrap"><table><thead><tr><th>Contributor</th><th>Modes</th><th>Teleop level</th><th class="right">Available</th><th class="right">Pending</th><th class="right">Lifetime</th><th class="right">Dividends</th><th class="right">Paid out</th><th></th></tr></thead><tbody>' +
         ops.balances.map(function (b) {
-          return '<tr><td><b>' + esc(b.worker.name) + '</b><div class="tiny soft">' + esc(b.worker.persona) + ' · ' + esc(b.worker.city) + '</div></td><td class="small">' + b.worker.modes.map(function (m) { return m === 'teleop' ? '🎮' : '🕶️'; }).join(' ') + '</td>' +
+          return '<tr><td><b>' + esc(b.worker.name) + '</b><div class="tiny soft">' + esc(b.worker.persona) + ' · ' + esc(b.worker.city) + (b.worker.payoutMethod === 'thc' && b.worker.thcNetwork ? ' · 💎 paid in THC' : '') + '</div></td><td class="small">' + b.worker.modes.map(function (m) { return m === 'teleop' ? '🎮' : '🕶️'; }).join(' ') + '</td>' +
             '<td class="small">' + (b.worker.modes.indexOf('teleop') >= 0 ? 'L' + b.level.level + ' · ' + b.level.approved + ' demos' : '–') + '</td>' +
-            '<td class="right"><b>' + LW.money(b.available) + '</b></td><td class="right">' + LW.money(b.pending) + '</td><td class="right">' + LW.money(b.earned) + '</td><td class="right">' + LW.money(b.byKind.royalty) + '</td><td class="right">' + LW.money(b.paidOut) + '</td>' +
+            '<td class="right"><b>' + LW.money(b.available) + '</b></td><td class="right">' + LW.money(b.pending) + '</td><td class="right">' + LW.money(b.earned) + '</td><td class="right">' + LW.money(b.byKind.royalty) + '</td><td class="right">' + LW.money(b.paidOut) + (b.processing ? '<div class="tiny soft">+' + LW.money(b.processing) + ' in THC on its way</div>' : '') + '</td>' +
             '<td class="right"><button class="btn sm" data-pay="' + esc(b.worker.id) + '" ' + (b.available > 0 ? '' : 'disabled') + '>Pay</button></td></tr>';
         }).join('') + '</tbody></table></div></section>' +
+      '<section class="card" id="thcTreasury"><div class="loading"><span class="spinner"></span> Loading the THC treasury…</div></section>' +
       '<section class="card"><div class="card-head"><h2>Ledger</h2><span class="small muted">latest 80 entries · every cent itemised</span></div><div class="table-wrap"><table><thead><tr><th>When</th><th>Contributor</th><th>Type</th><th>Memo</th><th>Status</th><th class="right">Amount</th></tr></thead><tbody>' +
         ops.ledger.map(function (e) {
           return '<tr><td class="nowrap small">' + LW.ago(e.at) + '</td><td>' + esc(e.workerName) + '</td><td><span class="dot" style="background:var(' + (LW.KIND_COLOR[e.kind] || '--cp-text') + ')"></span> ' + esc(LW.KIND_LABEL[e.kind] || e.kind) + '</td><td class="small">' + esc(e.memo) + '</td><td>' + LW.statusPill(e.status) + '</td><td class="right nowrap"><b>' + LW.money(e.cents) + '</b></td></tr>';
@@ -96,10 +97,13 @@
         if (s && s.demo) LW.replayModal('Review: ' + s.workerName + ' · ' + s.skillName, Object.assign({ label: 'REVIEW REPLAY · ' + s.workerName }, framesFromDemo(s.demo.init, s.demo.actions)));
       } else if (btn.hasAttribute('data-pay')) {
         const res = await LW.busy(btn, function () { return LW.api.call('payout', { workerId: btn.getAttribute('data-pay') }); });
-        if (res) { LW.toast('💸 ' + LW.money(res.receipt.amountCents) + ' sent to ' + esc(res.receipt.method) + ' · ' + esc(res.receipt.reference), 'ok'); LW.render(); }
+        if (res) {
+          LW.toast(res.thcPayout ? '💎 Queued ' + esc(res.thcPayout.thc) + ' THC for ' + esc(res.thcPayout.workerName) + '. Pay it in the THC treasury below.' : '💸 ' + LW.money(res.receipt.amountCents) + ' sent to ' + esc(res.receipt.method) + ' · ' + esc(res.receipt.reference), 'ok');
+          LW.render();
+        }
       } else if (btn.getAttribute('data-act') === 'payall') {
         const res = await LW.busy(btn, function () { return LW.api.call('payAll', {}); });
-        if (res) { LW.toast('🏦 Payout run: ' + LW.money(res.totalCents) + ' to ' + res.count + ' contributors', 'ok'); LW.render(); }
+        if (res) { LW.toast('🏦 Payout run: ' + LW.money(res.totalCents) + ' to ' + res.count + ' contributors' + (res.thcQueued ? '. ' + res.thcQueued + (res.thcQueued === 1 ? ' chose THC and is' : ' chose THC and are') + ' queued for the treasury below.' : ''), 'ok', 6000); LW.render(); }
       } else if (btn.getAttribute('data-act') === 'save') {
         const v = function (id) { return Number(LW.$('#' + id, main).value); };
         const res = await LW.busy(btn, function () {
@@ -112,9 +116,20 @@
       } else if (btn.getAttribute('data-act') === 'reset') {
         if (!window.confirm('Reset the whole demo to the pilot state? All sessions, models and balances will be cleared.')) return;
         const res = await LW.busy(btn, function () { return LW.api.call('reset', {}); });
-        if (res) { LW.toast('Demo reset to the pilot', 'ok'); location.hash = '#/overview'; LW.render(); }
+        if (res) {
+          if (LW.api.mode !== 'server' && LW.thc) LW.thc.resetDemo();
+          LW.toast('Demo reset to the pilot', 'ok');
+          location.hash = '#/overview';
+          LW.render();
+        }
       }
     });
+    const treasuryEl = LW.$('#thcTreasury', main);
+    if (treasuryEl && LW.renderThcTreasury) {
+      LW.renderThcTreasury(treasuryEl).catch(function (err) {
+        if (treasuryEl.isConnected) treasuryEl.innerHTML = '<h2>💎 THC treasury</h2><p class="muted" style="margin-top:8px">Could not load: ' + esc(err.message) + '</p>';
+      });
+    }
     return null;
   };
 

@@ -17,7 +17,7 @@
     } else if (LW.api.hosted) {
       badge.className = 'pill accent';
       badge.textContent = 'Runs in your browser';
-      badge.title = 'This public demo runs the whole LoopWork platform (engine, "server" and robot fleet) inside your browser. Nothing is sent anywhere and your progress stays on this device. Ops & pay → Reset demo starts over.';
+      badge.title = 'This public demo runs the whole LoopWork platform (engine, "server" and robot fleet) inside your browser, and your progress stays on this device. Only the THC wallet talks to outside services: THC prices, BNB Smart Chain data and the transfers you approve in your own wallet. Ops & pay → Reset demo starts over.';
     } else {
       badge.className = 'pill warn';
       badge.textContent = 'Offline demo';

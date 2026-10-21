@@ -181,7 +181,7 @@ test('state survives JSON persistence and failure replays stay bit-exact', () =>
 });
 
 test('every route round-trips between the client request builder and the server matcher', () => {
-  const sample = { workerId: 'w_you', episodeId: 'ep1', sessionId: 's1', eventId: 'ev1', version: 3 };
+  const sample = { workerId: 'w_you', episodeId: 'ep1', sessionId: 's1', eventId: 'ev1', version: 3, network: 'sim' };
   for (const r of E.ROUTES) {
     const req = E.buildRequest(r.op, sample);
     const m = E.matchRoute(req.method, req.url.split('?')[0]);
